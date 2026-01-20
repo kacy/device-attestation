@@ -506,35 +506,39 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 	copy(composite[len(authData):], clientDataHash)
 	expectedNonce := sha256.Sum256(composite)
 
-	// Apple App Attest nonce OIDs - Apple may use different OIDs in different versions
-	// 1.2.840.113635.100.8.1 - Original nonce OID
-	// 1.2.840.113635.100.8.5 - Possibly new nonce location (observed in 2026)
-	// 1.2.840.113635.100.8.6 - Possibly new nonce location (observed in 2026)
-	// 1.2.840.113635.100.8.7 - Possibly new nonce location (observed in 2026)
-	nonceOIDs := []asn1.ObjectIdentifier{
-		{1, 2, 840, 113635, 100, 8, 1}, // Original
-		{1, 2, 840, 113635, 100, 8, 5}, // New (2026)
-		{1, 2, 840, 113635, 100, 8, 6}, // New (2026)
-		{1, 2, 840, 113635, 100, 8, 7}, // New (2026)
-	}
+	// Apple App Attest OIDs
+	appleOIDPrefix := asn1.ObjectIdentifier{1, 2, 840, 113635, 100, 8}
 
-	// Collect extension OIDs for debugging
-	var extOIDs []string
+	// Collect extension info for debugging - include raw hex for Apple extensions
+	var extDebug []string
 	for _, ext := range cert.Extensions {
-		extOIDs = append(extOIDs, ext.Id.String())
+		if len(ext.Id) >= 6 && ext.Id[0] == 1 && ext.Id[1] == 2 && ext.Id[2] == 840 && ext.Id[3] == 113635 && ext.Id[4] == 100 && ext.Id[5] == 8 {
+			// Apple App Attest extension - include hex dump (first 64 bytes max)
+			hexDump := fmt.Sprintf("%x", ext.Value)
+			if len(hexDump) > 128 {
+				hexDump = hexDump[:128] + "..."
+			}
+			extDebug = append(extDebug, fmt.Sprintf("%s(len=%d,hex=%s)", ext.Id.String(), len(ext.Value), hexDump))
+		} else {
+			extDebug = append(extDebug, ext.Id.String())
+		}
 	}
 
-	// Try each possible nonce OID
-	for _, nonceOID := range nonceOIDs {
+	// Try each Apple OID (.8.1 through .8.9)
+	for suffix := 1; suffix <= 9; suffix++ {
+		targetOID := make(asn1.ObjectIdentifier, len(appleOIDPrefix)+1)
+		copy(targetOID, appleOIDPrefix)
+		targetOID[len(appleOIDPrefix)] = suffix
+
 		for _, ext := range cert.Extensions {
-			if !ext.Id.Equal(nonceOID) {
+			if !ext.Id.Equal(targetOID) {
 				continue
 			}
 
 			// Try to extract the nonce using various ASN.1 structures
 			nonce, err := v.extractNonceFromExtension(ext.Value)
 			if err != nil {
-				// Log but continue trying other parsing methods
+				// Log but continue trying other OIDs
 				continue
 			}
 
@@ -542,11 +546,11 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 				return nil
 			}
 
-			return fmt.Errorf("nonce mismatch in OID %s: expected %x, got %x", nonceOID.String(), expectedNonce[:], nonce)
+			return fmt.Errorf("nonce mismatch in OID %s: expected %x, got %x", targetOID.String(), expectedNonce[:], nonce)
 		}
 	}
 
-	return fmt.Errorf("nonce extension not found in any known OID, certificate has extensions: %v", extOIDs)
+	return fmt.Errorf("nonce not found in any Apple OID, expected=%x, extensions: %v", expectedNonce[:], extDebug)
 }
 
 // extractNonceFromExtension tries multiple ASN.1 parsing strategies to extract the nonce
