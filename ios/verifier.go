@@ -178,48 +178,48 @@ func NewVerifier(cfg Config) (*Verifier, error) {
 // VerifyAttestation verifies an iOS App Attest attestation.
 func (v *Verifier) VerifyAttestation(ctx context.Context, req *AttestationRequest) (*AttestationResult, error) {
 	if _, ok := v.bundleIDSet[req.BundleID]; !ok {
-		return nil, ErrInvalidBundleID
+		return nil, fmt.Errorf("%w: bundle_id=%s not in allowed set", ErrInvalidBundleID, req.BundleID)
 	}
 
 	if req.KeyID == "" {
-		return nil, ErrInvalidKeyID
+		return nil, fmt.Errorf("%w: key_id is empty", ErrInvalidKeyID)
 	}
 
 	attestationData, err := base64.StdEncoding.DecodeString(req.Attestation)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to decode attestation: %v", ErrInvalidAttestation, err)
+		return nil, fmt.Errorf("%w: failed to decode attestation base64: %v", ErrInvalidAttestation, err)
 	}
 
 	attestObj, err := v.parseAttestationObject(attestationData)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidAttestation, err)
+		return nil, fmt.Errorf("%w: failed to parse attestation object: %v", ErrInvalidAttestation, err)
 	}
 
 	certs, err := v.parseCertificateChain(attestObj.AttStatement.X5c)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidAttestation, err)
+		return nil, fmt.Errorf("%w: failed to parse certificate chain: %v", ErrInvalidAttestation, err)
 	}
 
 	if err := v.verifyCertificateChain(certs); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrVerificationFailed, err)
+		return nil, fmt.Errorf("%w: certificate chain verification failed: %v", ErrVerificationFailed, err)
 	}
 
 	if err := v.verifyAuthenticatorData(attestObj.AuthData, req.BundleID); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrVerificationFailed, err)
+		return nil, fmt.Errorf("%w: authenticator data verification failed: %v", ErrVerificationFailed, err)
 	}
 
 	clientDataHash := sha256.Sum256([]byte(req.Challenge))
 	if err := v.verifyNonce(certs[0], attestObj.AuthData, clientDataHash[:]); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrVerificationFailed, err)
+		return nil, fmt.Errorf("%w: nonce verification failed: %v", ErrVerificationFailed, err)
 	}
 
 	publicKey, err := v.extractPublicKey(certs[0])
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrVerificationFailed, err)
+		return nil, fmt.Errorf("%w: failed to extract public key: %v", ErrVerificationFailed, err)
 	}
 
 	if err := v.verifyKeyID(publicKey, req.KeyID); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrVerificationFailed, err)
+		return nil, fmt.Errorf("%w: key ID verification failed: %v", ErrVerificationFailed, err)
 	}
 
 	// Store the public key if a key store is configured
