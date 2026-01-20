@@ -503,19 +503,20 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 		// First, unmarshal the outer SEQUENCE
 		var seq []asn1.RawValue
 		if _, err := asn1.Unmarshal(ext.Value, &seq); err != nil || len(seq) == 0 {
-			return errors.New("failed to parse credCert extension sequence")
+			return fmt.Errorf("failed to parse credCert extension sequence: %v", err)
 		}
 
 		// Then, unmarshal the inner OCTET STRING to get the actual nonce bytes
 		var innerOctet asn1.RawValue
 		if _, err := asn1.Unmarshal(seq[0].FullBytes, &innerOctet); err != nil {
-			return errors.New("failed to parse credCert inner octet string")
+			return fmt.Errorf("failed to parse credCert inner octet string: %v", err)
 		}
 
 		if bytes.Equal(innerOctet.Bytes, expected[:]) {
 			return nil
 		}
-		return errors.New("nonce mismatch")
+		return fmt.Errorf("nonce mismatch: got %x (len=%d), expected %x (len=%d), clientDataHash=%x, authDataLen=%d",
+			innerOctet.Bytes, len(innerOctet.Bytes), expected[:], len(expected), clientDataHash, len(authData))
 	}
 
 	return errors.New("credCert extension not found")
