@@ -506,7 +506,17 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 	copy(composite[len(authData):], clientDataHash)
 	expectedNonce := sha256.Sum256(composite)
 
-	nonceOID := asn1.ObjectIdentifier{1, 2, 840, 113635, 100, 8, 1}
+	// Apple App Attest nonce OIDs - Apple may use different OIDs in different versions
+	// 1.2.840.113635.100.8.1 - Original nonce OID
+	// 1.2.840.113635.100.8.5 - Possibly new nonce location (observed in 2026)
+	// 1.2.840.113635.100.8.6 - Possibly new nonce location (observed in 2026)
+	// 1.2.840.113635.100.8.7 - Possibly new nonce location (observed in 2026)
+	nonceOIDs := []asn1.ObjectIdentifier{
+		{1, 2, 840, 113635, 100, 8, 1}, // Original
+		{1, 2, 840, 113635, 100, 8, 5}, // New (2026)
+		{1, 2, 840, 113635, 100, 8, 6}, // New (2026)
+		{1, 2, 840, 113635, 100, 8, 7}, // New (2026)
+	}
 
 	// Collect extension OIDs for debugging
 	var extOIDs []string
@@ -514,37 +524,80 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 		extOIDs = append(extOIDs, ext.Id.String())
 	}
 
-	for _, ext := range cert.Extensions {
-		if !ext.Id.Equal(nonceOID) {
-			continue
-		}
+	// Try each possible nonce OID
+	for _, nonceOID := range nonceOIDs {
+		for _, ext := range cert.Extensions {
+			if !ext.Id.Equal(nonceOID) {
+				continue
+			}
 
-		var outerSeq asn1.RawValue
-		rest, err := asn1.Unmarshal(ext.Value, &outerSeq)
-		if err != nil || len(rest) > 0 {
-			return errors.New("failed to parse nonce extension")
-		}
+			// Try to extract the nonce using various ASN.1 structures
+			nonce, err := v.extractNonceFromExtension(ext.Value)
+			if err != nil {
+				// Log but continue trying other parsing methods
+				continue
+			}
 
-		var innerSeq asn1.RawValue
-		rest, err = asn1.Unmarshal(outerSeq.Bytes, &innerSeq)
-		if err != nil || len(rest) > 0 {
-			return errors.New("failed to parse nonce sequence")
-		}
+			if bytes.Equal(nonce, expectedNonce[:]) {
+				return nil
+			}
 
-		var nonce []byte
-		_, err = asn1.Unmarshal(innerSeq.Bytes, &nonce)
-		if err != nil {
-			nonce = innerSeq.Bytes
+			return fmt.Errorf("nonce mismatch in OID %s: expected %x, got %x", nonceOID.String(), expectedNonce[:], nonce)
 		}
-
-		if bytes.Equal(nonce, expectedNonce[:]) {
-			return nil
-		}
-
-		return fmt.Errorf("nonce mismatch: expected %x, got %x", expectedNonce[:], nonce)
 	}
 
-	return fmt.Errorf("nonce extension not found (OID 1.2.840.113635.100.8.1), certificate has extensions: %v", extOIDs)
+	return fmt.Errorf("nonce extension not found in any known OID, certificate has extensions: %v", extOIDs)
+}
+
+// extractNonceFromExtension tries multiple ASN.1 parsing strategies to extract the nonce
+func (v *Verifier) extractNonceFromExtension(extValue []byte) ([]byte, error) {
+	// Strategy 1: Original format - SEQUENCE { SEQUENCE { OCTET STRING nonce } }
+	var outerSeq asn1.RawValue
+	rest, err := asn1.Unmarshal(extValue, &outerSeq)
+	if err == nil && len(rest) == 0 {
+		var innerSeq asn1.RawValue
+		rest, err = asn1.Unmarshal(outerSeq.Bytes, &innerSeq)
+		if err == nil && len(rest) == 0 {
+			var nonce []byte
+			_, err = asn1.Unmarshal(innerSeq.Bytes, &nonce)
+			if err == nil && len(nonce) == 32 {
+				return nonce, nil
+			}
+			// Try using raw bytes if OCTET STRING parsing fails
+			if len(innerSeq.Bytes) == 32 {
+				return innerSeq.Bytes, nil
+			}
+		}
+		// Try outer bytes directly
+		if len(outerSeq.Bytes) == 32 {
+			return outerSeq.Bytes, nil
+		}
+	}
+
+	// Strategy 2: Direct OCTET STRING
+	var directOctet []byte
+	_, err = asn1.Unmarshal(extValue, &directOctet)
+	if err == nil && len(directOctet) == 32 {
+		return directOctet, nil
+	}
+
+	// Strategy 3: Raw bytes (if extension value is exactly 32 bytes)
+	if len(extValue) == 32 {
+		return extValue, nil
+	}
+
+	// Strategy 4: Single SEQUENCE with OCTET STRING
+	var singleSeq asn1.RawValue
+	rest, err = asn1.Unmarshal(extValue, &singleSeq)
+	if err == nil && len(rest) == 0 {
+		var octetString []byte
+		_, err = asn1.Unmarshal(singleSeq.Bytes, &octetString)
+		if err == nil && len(octetString) == 32 {
+			return octetString, nil
+		}
+	}
+
+	return nil, errors.New("could not extract 32-byte nonce from extension")
 }
 
 func (v *Verifier) extractPublicKey(cert *x509.Certificate) (*ecdsa.PublicKey, error) {
