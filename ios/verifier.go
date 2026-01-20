@@ -499,14 +499,20 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 			continue
 		}
 
-		// Parse: SEQUENCE { OCTET STRING nonce }
+		// The extension value is: SEQUENCE { OCTET STRING { nonce } }
+		// First, unmarshal the outer SEQUENCE
 		var seq []asn1.RawValue
 		if _, err := asn1.Unmarshal(ext.Value, &seq); err != nil || len(seq) == 0 {
-			return errors.New("failed to parse credCert extension")
+			return errors.New("failed to parse credCert extension sequence")
 		}
 
-		// The nonce is in the first element's bytes
-		if bytes.Equal(seq[0].Bytes, expected[:]) {
+		// Then, unmarshal the inner OCTET STRING to get the actual nonce bytes
+		var innerOctet asn1.RawValue
+		if _, err := asn1.Unmarshal(seq[0].FullBytes, &innerOctet); err != nil {
+			return errors.New("failed to parse credCert inner octet string")
+		}
+
+		if bytes.Equal(innerOctet.Bytes, expected[:]) {
 			return nil
 		}
 		return errors.New("nonce mismatch")
