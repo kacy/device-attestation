@@ -486,7 +486,7 @@ func (v *Verifier) extractCounter(authData []byte) uint32 {
 }
 
 // verifyNonce verifies the challenge binding in the attestation certificate.
-// Apple embeds SHA256(authData || clientDataHash) in extension OID 1.2.840.113635.100.8.1
+// Apple embeds SHA256(authData || clientDataHash) in an extension under OID 1.2.840.113635.100.8.*
 func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash []byte) error {
 	// Compute expected nonce
 	composite := make([]byte, len(authData)+len(clientDataHash))
@@ -494,19 +494,25 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 	copy(composite[len(authData):], clientDataHash)
 	expected := sha256.Sum256(composite)
 
-	// Find and verify the nonce extension (OID 1.2.840.113635.100.8.1)
-	nonceOID := asn1.ObjectIdentifier{1, 2, 840, 113635, 100, 8, 1}
+	// Search all Apple App Attest extensions (1.2.840.113635.100.8.*)
+	// The nonce may be in .8.1 (original) or .8.5/.8.6/.8.7 (newer certificates)
 	for _, ext := range cert.Extensions {
-		if !ext.Id.Equal(nonceOID) {
+		if !isAppleAppAttestOID(ext.Id) {
 			continue
 		}
-		// Extract the 32-byte nonce from the ASN.1 structure
+		// Try to extract and match the nonce from this extension
 		if nonce := extractNonce(ext.Value); nonce != nil && bytes.Equal(nonce, expected[:]) {
 			return nil
 		}
-		return errors.New("nonce mismatch")
 	}
-	return errors.New("nonce extension not found")
+	return errors.New("nonce not found in any Apple extension")
+}
+
+// isAppleAppAttestOID checks if the OID is under Apple's App Attest arc (1.2.840.113635.100.8.*)
+func isAppleAppAttestOID(oid asn1.ObjectIdentifier) bool {
+	return len(oid) == 7 &&
+		oid[0] == 1 && oid[1] == 2 && oid[2] == 840 &&
+		oid[3] == 113635 && oid[4] == 100 && oid[5] == 8
 }
 
 // extractNonce finds a 32-byte SHA256 hash anywhere in the ASN.1 data.
