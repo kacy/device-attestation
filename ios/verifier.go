@@ -201,8 +201,18 @@ func (v *Verifier) VerifyAttestation(ctx context.Context, req *AttestationReques
 		return nil, fmt.Errorf("%w: failed to parse certificate chain: %v", ErrInvalidAttestation, err)
 	}
 
+	// Debug: log certificate chain info
+	var certDebug []string
+	for i, cert := range certs {
+		var extOIDs []string
+		for _, ext := range cert.Extensions {
+			extOIDs = append(extOIDs, ext.Id.String())
+		}
+		certDebug = append(certDebug, fmt.Sprintf("cert[%d]: subject=%s, issuer=%s, extensions=%v", i, cert.Subject.CommonName, cert.Issuer.CommonName, extOIDs))
+	}
+
 	if err := v.verifyCertificateChain(certs); err != nil {
-		return nil, fmt.Errorf("%w: certificate chain verification failed: %v", ErrVerificationFailed, err)
+		return nil, fmt.Errorf("%w: certificate chain verification failed (certs: %v): %v", ErrVerificationFailed, certDebug, err)
 	}
 
 	if err := v.verifyAuthenticatorData(attestObj.AuthData, req.BundleID); err != nil {
@@ -211,7 +221,12 @@ func (v *Verifier) VerifyAttestation(ctx context.Context, req *AttestationReques
 
 	clientDataHash := sha256.Sum256([]byte(req.Challenge))
 	if err := v.verifyNonce(certs[0], attestObj.AuthData, clientDataHash[:]); err != nil {
-		return nil, fmt.Errorf("%w: nonce verification failed: %v", ErrVerificationFailed, err)
+		// Include cert debug info in error
+		var extOIDs []string
+		for _, ext := range certs[0].Extensions {
+			extOIDs = append(extOIDs, ext.Id.String())
+		}
+		return nil, fmt.Errorf("%w: nonce verification failed (leaf cert subject=%s, extensions=%v): %v", ErrVerificationFailed, certs[0].Subject.CommonName, extOIDs, err)
 	}
 
 	publicKey, err := v.extractPublicKey(certs[0])
@@ -493,6 +508,12 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 
 	nonceOID := asn1.ObjectIdentifier{1, 2, 840, 113635, 100, 8, 1}
 
+	// Collect extension OIDs for debugging
+	var extOIDs []string
+	for _, ext := range cert.Extensions {
+		extOIDs = append(extOIDs, ext.Id.String())
+	}
+
 	for _, ext := range cert.Extensions {
 		if !ext.Id.Equal(nonceOID) {
 			continue
@@ -520,10 +541,10 @@ func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash 
 			return nil
 		}
 
-		return errors.New("nonce mismatch")
+		return fmt.Errorf("nonce mismatch: expected %x, got %x", expectedNonce[:], nonce)
 	}
 
-	return errors.New("nonce extension not found")
+	return fmt.Errorf("nonce extension not found (OID 1.2.840.113635.100.8.1), certificate has extensions: %v", extOIDs)
 }
 
 func (v *Verifier) extractPublicKey(cert *x509.Certificate) (*ecdsa.PublicKey, error) {
