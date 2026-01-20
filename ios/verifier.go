@@ -485,79 +485,73 @@ func (v *Verifier) extractCounter(authData []byte) uint32 {
 	return binary.BigEndian.Uint32(authData[33:37])
 }
 
-// verifyNonce verifies the nonce in the attestation certificate.
-// Apple embeds a nonce in the credential certificate as: SHA256(authData || clientDataHash)
-// The nonce is in extension OID 1.2.840.113635.100.8.1 as SEQUENCE { SEQUENCE { OCTET STRING } }
+// verifyNonce verifies the challenge binding in the attestation certificate.
+// Apple embeds SHA256(authData || clientDataHash) in extension OID 1.2.840.113635.100.8.1
 func (v *Verifier) verifyNonce(cert *x509.Certificate, authData, clientDataHash []byte) error {
-	// Compute expected nonce: SHA256(authData || clientDataHash)
+	// Compute expected nonce
 	composite := make([]byte, len(authData)+len(clientDataHash))
 	copy(composite, authData)
 	copy(composite[len(authData):], clientDataHash)
-	expectedNonce := sha256.Sum256(composite)
+	expected := sha256.Sum256(composite)
 
-	// Apple App Attest nonce OID
+	// Find and verify the nonce extension (OID 1.2.840.113635.100.8.1)
 	nonceOID := asn1.ObjectIdentifier{1, 2, 840, 113635, 100, 8, 1}
-
-	// Find the nonce extension
 	for _, ext := range cert.Extensions {
 		if !ext.Id.Equal(nonceOID) {
 			continue
 		}
-
-		// Parse: SEQUENCE { SEQUENCE { OCTET STRING nonce } }
-		nonce, err := parseNonceExtension(ext.Value)
-		if err != nil {
-			return fmt.Errorf("failed to parse nonce extension: %w", err)
+		// Extract the 32-byte nonce from the ASN.1 structure
+		if nonce := extractNonce(ext.Value); nonce != nil && bytes.Equal(nonce, expected[:]) {
+			return nil
 		}
-
-		if !bytes.Equal(nonce, expectedNonce[:]) {
-			return errors.New("nonce mismatch")
-		}
-		return nil
+		return errors.New("nonce mismatch")
 	}
-
 	return errors.New("nonce extension not found")
 }
 
-// parseNonceExtension extracts the 32-byte nonce from the extension value.
-// Format: SEQUENCE { SEQUENCE { OCTET STRING nonce } }
-func parseNonceExtension(data []byte) ([]byte, error) {
-	// Outer SEQUENCE
-	var outer asn1.RawValue
-	rest, err := asn1.Unmarshal(data, &outer)
-	if err != nil {
-		return nil, err
-	}
-	if len(rest) > 0 {
-		return nil, errors.New("trailing data after outer sequence")
+// extractNonce finds a 32-byte SHA256 hash anywhere in the ASN.1 data.
+// This is more robust than assuming a specific structure.
+func extractNonce(data []byte) []byte {
+	// Quick check: if we can find 32 consecutive bytes that look right, use them
+	// The nonce is always a SHA256 hash (32 bytes), usually wrapped in ASN.1 SEQUENCE/OCTET STRING
+
+	// Try structured parsing first: SEQUENCE { SEQUENCE { OCTET STRING } }
+	if nonce := parseNestedASN1(data); len(nonce) == 32 {
+		return nonce
 	}
 
-	// Inner SEQUENCE
-	var inner asn1.RawValue
-	rest, err = asn1.Unmarshal(outer.Bytes, &inner)
-	if err != nil {
-		return nil, err
-	}
-	if len(rest) > 0 {
-		return nil, errors.New("trailing data after inner sequence")
-	}
+	// Fallback: scan for any 32-byte OCTET STRING in the data
+	return findOctetString32(data)
+}
 
-	// OCTET STRING containing the nonce
+// parseNestedASN1 tries to parse SEQUENCE { SEQUENCE { OCTET STRING } }
+func parseNestedASN1(data []byte) []byte {
+	var outer, inner asn1.RawValue
+	if rest, err := asn1.Unmarshal(data, &outer); err != nil || len(rest) > 0 {
+		return nil
+	}
+	if rest, err := asn1.Unmarshal(outer.Bytes, &inner); err != nil || len(rest) > 0 {
+		return nil
+	}
 	var nonce []byte
-	_, err = asn1.Unmarshal(inner.Bytes, &nonce)
-	if err != nil {
-		// Fallback: try raw bytes if it's already 32 bytes
-		if len(inner.Bytes) == 32 {
-			return inner.Bytes, nil
+	if _, err := asn1.Unmarshal(inner.Bytes, &nonce); err == nil && len(nonce) == 32 {
+		return nonce
+	}
+	if len(inner.Bytes) == 32 {
+		return inner.Bytes
+	}
+	return nil
+}
+
+// findOctetString32 scans ASN.1 data for a 32-byte OCTET STRING
+func findOctetString32(data []byte) []byte {
+	for i := 0; i < len(data)-33; i++ {
+		// Look for OCTET STRING tag (0x04) followed by length 32 (0x20)
+		if data[i] == 0x04 && data[i+1] == 0x20 {
+			return data[i+2 : i+34]
 		}
-		return nil, err
 	}
-
-	if len(nonce) != 32 {
-		return nil, fmt.Errorf("invalid nonce length: got %d, want 32", len(nonce))
-	}
-
-	return nonce, nil
+	return nil
 }
 
 func (v *Verifier) extractPublicKey(cert *x509.Certificate) (*ecdsa.PublicKey, error) {
