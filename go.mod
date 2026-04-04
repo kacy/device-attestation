@@ -3,7 +3,7 @@ module github.com/kacy/device-attestation
 go 1.25.5
 
 require (
-	github.com/fxamacker/cbor/v2 v2.9.0
+	github.com/fxamacker/cbor/v2 v2.9.1
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/api v0.260.0
 )
